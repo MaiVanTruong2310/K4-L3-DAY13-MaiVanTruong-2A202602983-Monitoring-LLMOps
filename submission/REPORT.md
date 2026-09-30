@@ -8,8 +8,8 @@
 - **MSSV:** 2A202602983
 - **Lớp:** K4-L3B
 - **Repository URL:** https://github.com/MaiVanTruong2310/K4-L3-DAY13-MaiVanTruong-2A202602983-Monitoring-LLMOps
-- **Commit SHA cuối:** 6b9c129b4c25284b1e2250c9448785026f99007c
-- **Challenge ID:** `k4-l3b-monitoring-practice` (hoặc ID file challenge chính thức của L3B)
+- **Commit SHA cuối:** 27343d5538c190b37aeb5f01e410fc79b9d382ef
+- **Challenge ID:** `day13-k4-l3b-monitoring-llmops-v1`
 - **Tên project Langfuse cá nhân:** `day13-k4-l3b-2A202602983`
 
 ## 2. Evidence index
@@ -111,23 +111,27 @@
 
 ## 7. Điều tra challenge
 
-- **Challenge ID:** `k4-l3b-monitoring-practice` (kịch bản điều tra sự cố Vector Store Timeout)
-- **Khoảng thời gian điều tra:** 02:42:00 UTC – 02:43:00 UTC (ngày 30/09/2026)
-- **Triệu chứng từ metrics:** Panel Errors trên dashboard báo động đỏ (BREACHED): tỉ lệ lỗi `error_rate_pct` tăng vọt lên **8.33%** (vượt ngưỡng cho phép 2%), đồng thời `retrieval_success_rate_pct` sụt giảm xuống **91.7%** (dưới mức guardrail 90%).
+- **Challenge ID:** `day13-k4-l3b-monitoring-llmops-v1` (Incident: `rag_slow`, Seed: `1312`)
+- **Khoảng thời gian điều tra:** 04:41:00 UTC – 04:42:00 UTC (ngày 30/09/2026)
+- **Triệu chứng từ metrics:** Panel Latency trên Dashboard báo động: độ trễ P95 tăng vọt từ baseline ~157 ms lên **2,929 ms – 4,013 ms**, vượt xa ngưỡng `latency_threshold_ms: 2000` của challenge và chạm ngưỡng vi phạm SLO (3000 ms). Kích hoạt alert `HighLatencyP95`.
 - **Log line và correlation ID liên quan:**
-  - Log dòng lỗi: `{"service": "api", "error_type": "RuntimeError", "tool_name": "retrieval", "tool_success": false, "payload": {"detail": "Vector store timeout", "message_preview": "Can I get help with policy?"}, "event": "request_failed", "correlation_id": "req-65162a27", "level": "error", "ts": "2026-09-30T02:42:28.096571Z"}`
-  - `correlation_id` đại diện bị ảnh hưởng: `req-65162a27`.
+  - Log dòng kết thúc request: `{"service": "api", "latency_ms": 4013, "ttft_ms": 50, "tokens_in": 34, "tokens_out": 178, "cost_usd": 0.002811, "quality_score": 0.9, "tool_name": "retrieval", "tool_success": true, "payload": {"answer_preview": "Starter answer. You should improve this output logic..."}, "event": "response_sent", "user_id_hash": "2f015d970c0b", "feature": "monitoring", "correlation_id": "req-cea6cad0", "env": "dev", "model": "claude-sonnet-4-5", "session_id": "k4-l3b-challenge-s02", "level": "info", "ts": "2026-09-30T04:41:24.136456Z"}`
+  - `correlation_id` đại diện bị ảnh hưởng: `req-cea6cad0` (và nhóm request cùng đợt: `req-785c9c85`, `req-976dd581`, `req-7fcd0db3`, `req-d1315fbd`).
 - **Trace ID và span gây ảnh hưởng:**
-  - Tra cứu trace có `correlation_id = req-65162a27` trên Langfuse.
-  - Span gây sự cố: Span `retrieval` bị exception `RuntimeError: Vector store timeout` khiến toàn bộ luồng xử lý bị gián đoạn và trả về HTTP 500.
-- **Root cause:** Module truy xuất ngữ cảnh Mock RAG (`retrieve`) gặp lỗi timeout kết nối đến vector store (do scenario `tool_fail` được kích hoạt), không trả về được context tài liệu.
+  - Tra cứu trace có `correlation_id = req-cea6cad0` trên Langfuse.
+  - Phân tích span tree trong trace waterfall:
+    - Root trace `day13-agent-request`: tổng thời gian 4,013 ms.
+    - Span con `generation`: thời gian thực thi chỉ mất 152 ms (hoạt động bình thường).
+    - Span con `retrieval` (loại `retriever`): thời gian thực thi chiếm đến **2,504 ms** (>62% tổng độ trễ request).
+- **Root cause:**
+  - Sự cố độ trễ bắt nguồn trực tiếp từ module tìm kiếm ngữ cảnh Mock RAG (`retrieve()`). Trạng thái incident `rag_slow` được bật trên feature `monitoring`, mô phỏng hiện tượng vector store bị quá tải / index truy vấn chậm làm nghẽn 2.5s ở tầng retrieval, không phải do LLM generation chậm.
 - **Fix action:**
-  - Tắt kịch bản sự cố thông qua lệnh: `python scripts/inject_incident.py --scenario tool_fail --disable`.
-  - Khôi phục trạng thái sẵn sàng của vector store và kiểm tra lại health check `/health`.
+  - Tắt kịch bản incident bằng lệnh: `python scripts/inject_incident.py --disable` (trả `STATE['rag_slow'] = False`).
+  - Kiểm tra lại latency sau khi tắt: độ trễ hồi phục về mức bình thường (~155 ms – 165 ms).
 - **Preventive measure:**
-  - Thiết lập cơ chế retry với exponential backoff cho bước retrieval.
-  - Bổ sung circuit breaker và cơ chế fallback: khi retrieval gặp lỗi, agent không làm sập request mà chuyển sang chế độ trả lời tổng quát bằng LLM với ghi chú cảnh báo.
-  - Kích hoạt alert `LowRetrievalSuccessRate` trên kênh Slack để đội ngũ trực vận hành can thiệp trước khi ảnh hưởng diện rộng.
+  - Thiết lập bộ nhớ đệm (caching) cho các query vector retrieval phổ biến nhằm giảm tải cho vector database.
+  - Cấu hình retrieval timeout (ví dụ: tối đa 1500 ms): nếu bước tìm kiếm vượt ngưỡng, tự động chuyển sang fallback hoặc trả về tài liệu top-k nhanh nhất.
+  - Duy trì alert `HighLatencyP95` (duration: 5m) trên kênh Slack kèm runbook để đội trực nhận cảnh báo và xử lý sớm trước khi cạn kiệt error budget (0.5%).
 
 ## 8. Giải thích và tự đánh giá
 
